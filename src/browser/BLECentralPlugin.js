@@ -1,4 +1,3 @@
-  
 function notSupported() {
     console.log('BLE is not supported on the browser');
 }
@@ -31,9 +30,12 @@ module.exports = {
         let requestDeviceOptions = {};
 
         if (services && services.length) {
-            requestDeviceOptions.filters = [{
-                services: services.map(formatUUID)
-            }];
+            requestDeviceOptions.filters = services.map(s => ({
+                services: [formatUUID(s)]
+            }));
+            if (options.optionalServices) {
+                requestDeviceOptions.optionalServices = options.optionalServices.map(formatUUID);
+            }
         } else {
             requestDeviceOptions.acceptAllDevices = true;
         }
@@ -42,20 +44,61 @@ module.exports = {
             var deviceInfo = this.deviceInfos.get(device.id) || {};
             deviceInfo.device = device;
             this.deviceInfos.set(device.id, deviceInfo);
-            success({ id: device.id });
+            success({ id: device.id, name: device.name });
         }).catch(failure);
     },
     stopScan: function(success, failure) {
         if (success) success();
     },
     connect: function(deviceId, success, failure) {
+        const getDeviceInfo = (server) => {
+            const results = {
+                id: server.device.id,
+                name: server.device.name,
+                services: [],
+                characteristics: [],
+            };
+            return server
+                .getPrimaryServices()
+                .then((services) => {
+                    results.services = services.map((service) => service.uuid);
+                    return Promise.all(services.map((service) => service.getCharacteristics()));
+                })
+                .then((allServiceCharacteristics) => {
+                    for (let i = 0; i < allServiceCharacteristics.length; i++) {
+                        const service = results.services[i];
+                        const serviceCharacteristics = allServiceCharacteristics[i];
+                        for (const serviceCharacteristic of serviceCharacteristics) {
+                            const properties = [];
+                            if (serviceCharacteristic.properties) {
+                                if (serviceCharacteristic.properties.read) {
+                                    properties.push('Read');
+                                }
+                                if (serviceCharacteristic.properties.write) {
+                                    properties.push('Write');
+                                }
+                                if (serviceCharacteristic.properties.notify) {
+                                    properties.push('Notify');
+                                }
+                            }
+                            results.characteristics.push({
+                                service,
+                                characteristic: serviceCharacteristic.uuid,
+                                properties
+                            });
+                        }
+                    }
+                    success(results);
+                });
+        };
+
         const connectGatt = (gatt) => {
             return gatt.connect().then(server => {
                 this.deviceInfos.set(deviceId, {
                     device: deviceInfo,
                     server: server
                 })
-                success();
+                return getDeviceInfo(server);
             }).catch(err => {
                 if (failure) failure(err);
             });
@@ -72,8 +115,8 @@ module.exports = {
                 if (failure) failure(new Error('device not found'));
             });
         }
-        if (deviceInfo.server) {
-            success();
+        if (deviceInfo.server && deviceInfo.server.connected) {
+            return getDeviceInfo(deviceInfo.server);
         } else {
             return connectGatt(deviceInfo.device.gatt);
         }
@@ -179,8 +222,8 @@ module.exports = {
     },
     isConnected: function(deviceId, success, failure) {
         if (this.deviceInfos.has(deviceId)) {
-            var device = this.deviceInfos.get(deviceId).server.device;
-            if (device.gatt.connected) {
+            const server = this.deviceInfos.get(deviceId).server;
+            if (server && server.device.gatt.connected) {
                 success();
             } else {
                 if (failure) failure();
